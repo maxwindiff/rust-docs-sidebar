@@ -4,8 +4,15 @@ import * as util from 'util';
 
 const execPromise = util.promisify(child_process.exec);
 
+interface NavigationEntry {
+	content: string;
+	title: string;
+}
+
 class RustDocsProvider implements vscode.WebviewViewProvider {
 	private _view?: vscode.WebviewView;
+	private _history: NavigationEntry[] = [];
+	private _historyIndex: number = -1;
 
 	constructor(private readonly _extensionUri: vscode.Uri) {}
 
@@ -24,21 +31,66 @@ class RustDocsProvider implements vscode.WebviewViewProvider {
 		webviewView.webview.onDidReceiveMessage(async (message) => {
 			if (message.command === 'showMethodDocs') {
 				const methodName = message.methodName;
-				outputChannel.appendLine(`Clicked method: ${methodName}`);
-				vscode.window.showInformationMessage(`Method: ${methodName} (full docs coming soon)`);
+				const structName = message.structName;
+				const filePath = message.filePath;
+				outputChannel.appendLine(`Clicked method: ${methodName} for struct ${structName}`);
+
+				const methodDocs = await getMethodDocumentation(methodName, structName, filePath);
+				this.updateContent(methodDocs, `${structName}::${methodName}`);
+			} else if (message.command === 'goBack') {
+				this.goBack();
+			} else if (message.command === 'goForward') {
+				this.goForward();
 			}
 		});
 
-		webviewView.webview.html = this._getHtmlForWebview(webviewView.webview, 'Select a Rust symbol to view documentation');
+		webviewView.webview.html = this._getHtmlForWebview(webviewView.webview, 'Select a Rust symbol to view documentation', '', false, false);
 	}
 
-	public updateContent(content: string) {
+	public updateContent(content: string, title: string = '', addToHistory: boolean = true) {
 		if (this._view) {
-			this._view.webview.html = this._getHtmlForWebview(this._view.webview, content);
+			// Add to history (unless we're navigating, it's placeholder content, or it's identical to the last entry)
+			const lastEntry = this._historyIndex >= 0 ? this._history[this._historyIndex] : null;
+			const isDuplicate = lastEntry && lastEntry.title === title && lastEntry.content === content;
+
+			if (addToHistory && !content.includes('No hover information available') && !isDuplicate &&
+			    (this._historyIndex === -1 || this._historyIndex === this._history.length - 1)) {
+				this._history.push({ content, title });
+				this._historyIndex = this._history.length - 1;
+			}
+
+			const canGoBack = this._historyIndex > 0;
+			const canGoForward = this._historyIndex < this._history.length - 1;
+
+			this._view.webview.html = this._getHtmlForWebview(this._view.webview, content, title, canGoBack, canGoForward);
 		}
 	}
 
-	private _getHtmlForWebview(webview: vscode.Webview, content: string) {
+	private goBack() {
+		if (this._historyIndex > 0) {
+			this._historyIndex--;
+			const entry = this._history[this._historyIndex];
+			const canGoBack = this._historyIndex > 0;
+			const canGoForward = this._historyIndex < this._history.length - 1;
+			if (this._view) {
+				this._view.webview.html = this._getHtmlForWebview(this._view.webview, entry.content, entry.title, canGoBack, canGoForward);
+			}
+		}
+	}
+
+	private goForward() {
+		if (this._historyIndex < this._history.length - 1) {
+			this._historyIndex++;
+			const entry = this._history[this._historyIndex];
+			const canGoBack = this._historyIndex > 0;
+			const canGoForward = this._historyIndex < this._history.length - 1;
+			if (this._view) {
+				this._view.webview.html = this._getHtmlForWebview(this._view.webview, entry.content, entry.title, canGoBack, canGoForward);
+			}
+		}
+	}
+
+	private _getHtmlForWebview(webview: vscode.Webview, content: string, title: string, canGoBack: boolean, canGoForward: boolean) {
 		return `<!DOCTYPE html>
 			<html lang="en">
 			<head>
@@ -86,18 +138,63 @@ class RustDocsProvider implements vscode.WebviewViewProvider {
 					a.method-link:hover {
 						text-decoration: underline;
 					}
+					.nav-bar {
+						display: flex;
+						gap: 8px;
+						padding: 8px 0;
+						border-bottom: 1px solid var(--vscode-panel-border);
+						margin-bottom: 12px;
+					}
+					.nav-button {
+						background: var(--vscode-button-background);
+						color: var(--vscode-button-foreground);
+						border: none;
+						padding: 4px 12px;
+						cursor: pointer;
+						border-radius: 2px;
+						font-size: 12px;
+					}
+					.nav-button:hover:not(:disabled) {
+						background: var(--vscode-button-hoverBackground);
+					}
+					.nav-button:disabled {
+						opacity: 0.4;
+						cursor: not-allowed;
+					}
+					.nav-title {
+						flex: 1;
+						font-size: 12px;
+						color: var(--vscode-descriptionForeground);
+						align-self: center;
+						overflow: hidden;
+						text-overflow: ellipsis;
+						white-space: nowrap;
+					}
 				</style>
 				<script>
 					const vscode = acquireVsCodeApi();
-					function showMethodDocs(fnName) {
+					function showMethodDocs(fnName, structName, filePath) {
 						vscode.postMessage({
 							command: 'showMethodDocs',
-							methodName: fnName
+							methodName: fnName,
+							structName: structName,
+							filePath: filePath
 						});
+					}
+					function goBack() {
+						vscode.postMessage({ command: 'goBack' });
+					}
+					function goForward() {
+						vscode.postMessage({ command: 'goForward' });
 					}
 				</script>
 			</head>
 			<body>
+				<div class="nav-bar">
+					<button class="nav-button" onclick="goBack()" ${canGoBack ? '' : 'disabled'}>← Back</button>
+					<button class="nav-button" onclick="goForward()" ${canGoForward ? '' : 'disabled'}>Forward →</button>
+					${title ? `<div class="nav-title">${title}</div>` : ''}
+				</div>
 				${content}
 			</body>
 			</html>`;
@@ -126,9 +223,9 @@ async function getRustDocumentation(symbol: string, documentUri: vscode.Uri): Pr
 			if (editor) {
 				const position = editor.selection.active;
 				const hoverInfo = await getHoverInfo(symbol, documentUri);
-				const { methods, diagnostics } = await getStructMethods(symbol, documentUri, position);
+				const result = await getStructMethods(symbol, documentUri, position);
 				if (hoverInfo) {
-					return formatHoverInfo(hoverInfo, methods, diagnostics);
+					return formatHoverInfo(hoverInfo, result);
 				}
 			}
 			return `<p>No documentation found for symbol: <code>${symbol}</code></p>`;
@@ -164,7 +261,77 @@ interface MethodInfo {
 	line: number;
 }
 
-async function getStructMethods(symbol: string, documentUri: vscode.Uri, position: vscode.Position): Promise<{methods: MethodInfo[], diagnostics: string[]}> {
+interface StructMethodsResult {
+	methods: MethodInfo[];
+	diagnostics: string[];
+	structName: string;
+	filePath: string;
+}
+
+async function getMethodDocumentation(methodName: string, structName: string, filePath: string): Promise<string> {
+	try {
+		outputChannel.appendLine(`Getting full docs for ${structName}::${methodName} from ${filePath}`);
+
+		const document = await vscode.workspace.openTextDocument(vscode.Uri.file(filePath));
+		const text = document.getText();
+		const lines = text.split('\n');
+
+		// Find the method
+		let methodStart = -1;
+		for (let i = 0; i < lines.length; i++) {
+			if (lines[i].includes(`fn ${methodName}(`)) {
+				methodStart = i;
+				break;
+			}
+		}
+
+		if (methodStart === -1) {
+			return `<h2>${structName}::${methodName}</h2><p>Method not found</p>`;
+		}
+
+		// Collect all doc comments before the method
+		const docLines: string[] = [];
+		for (let i = methodStart - 1; i >= 0; i--) {
+			const trimmed = lines[i].trim();
+			if (trimmed.startsWith('///')) {
+				docLines.unshift(trimmed.substring(3).trim());
+			} else if (trimmed.startsWith('#[') || trimmed === '') {
+				continue;
+			} else {
+				break;
+			}
+		}
+
+		// Get the method signature
+		let signature = '';
+		for (let i = methodStart; i < lines.length; i++) {
+			signature += lines[i].trim() + ' ';
+			if (lines[i].includes('{')) {
+				break;
+			}
+		}
+
+		signature = signature.replace(/\s+/g, ' ').trim();
+		if (signature.includes('{')) {
+			signature = signature.substring(0, signature.indexOf('{')).trim();
+		}
+
+		let content = `<h2>${structName}::${methodName}</h2>`;
+		content += `<pre><code>${escapeHtml(signature)}</code></pre>`;
+
+		if (docLines.length > 0) {
+			content += '<div>';
+			content += markdownToHtml(docLines.join('\n'), false);
+			content += '</div>';
+		}
+
+		return content;
+	} catch (error) {
+		return `<h2>${structName}::${methodName}</h2><p>Error: ${error instanceof Error ? error.message : 'Unknown error'}</p>`;
+	}
+}
+
+async function getStructMethods(symbol: string, documentUri: vscode.Uri, position: vscode.Position): Promise<StructMethodsResult> {
 	const diagnostics: string[] = [];
 
 	function log(msg: string) {
@@ -370,14 +537,14 @@ async function getStructMethods(symbol: string, documentUri: vscode.Uri, positio
 
 		log(`Found ${methods.length} methods`);
 
-		return { methods, diagnostics };
+		return { methods, diagnostics, structName, filePath: defPath };
 	} catch (error) {
 		log(`Exception: ${error instanceof Error ? error.message : 'Unknown error'}`);
-		return { methods: [], diagnostics };
+		return { methods: [], diagnostics: [error instanceof Error ? error.message : 'Unknown error'], structName: symbol, filePath: '' };
 	}
 }
 
-function formatHoverInfo(hovers: vscode.Hover[], methods?: MethodInfo[], diagnostics?: string[]): string {
+function formatHoverInfo(hovers: vscode.Hover[], result?: StructMethodsResult): string {
 	if (!hovers || hovers.length === 0) {
 		return '<p>No hover information available</p>';
 	}
@@ -417,15 +584,15 @@ function formatHoverInfo(hovers: vscode.Hover[], methods?: MethodInfo[], diagnos
 		}
 	}
 
-	if (methods && methods.length > 0) {
+	if (result && result.methods && result.methods.length > 0) {
 		content += '<h4>Methods</h4>';
 		content += '<ul style="list-style: none; padding-left: 0;">';
-		for (const method of methods) {
+		for (const method of result.methods) {
 			const fnNameMatch = method.signature.match(/^(\w+)/);
 			const fnName = fnNameMatch ? fnNameMatch[1] : '';
 
 			content += '<li style="margin-bottom: 12px;">';
-			content += `<code><a href="#" class="method-link" onclick="showMethodDocs('${escapeHtml(fnName)}'); return false;">${escapeHtml(method.signature)}</a></code>`;
+			content += `<code><a href="#" class="method-link" onclick="showMethodDocs('${escapeHtml(fnName)}', '${escapeHtml(result.structName)}', '${escapeHtml(result.filePath)}'); return false;">${escapeHtml(method.signature)}</a></code>`;
 			if (method.doc) {
 				content += `<div style="font-size: 12px; color: var(--vscode-descriptionForeground); margin-top: 4px; margin-left: 0;">${escapeHtml(method.doc)}</div>`;
 			}
@@ -434,10 +601,10 @@ function formatHoverInfo(hovers: vscode.Hover[], methods?: MethodInfo[], diagnos
 		content += '</ul>';
 	}
 
-	if (diagnostics && diagnostics.length > 0) {
+	if (result && result.diagnostics && result.diagnostics.length > 0) {
 		content += '<details><summary>Diagnostics</summary>';
 		content += '<pre style="font-size: 11px; max-height: 300px; overflow-y: auto;">';
-		for (const diag of diagnostics) {
+		for (const diag of result.diagnostics) {
 			content += escapeHtml(diag) + '\n';
 		}
 		content += '</pre></details>';
