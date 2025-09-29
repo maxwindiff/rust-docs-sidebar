@@ -41,6 +41,14 @@ class RustDocsProvider implements vscode.WebviewViewProvider {
 				this.goBack();
 			} else if (message.command === 'goForward') {
 				this.goForward();
+			} else if (message.command === 'openFile') {
+				const uri = vscode.Uri.file(message.filePath);
+				const document = await vscode.workspace.openTextDocument(uri);
+				const editor = await vscode.window.showTextDocument(document);
+				const line = message.line || 0;
+				const position = new vscode.Position(line, 0);
+				editor.selection = new vscode.Selection(position, position);
+				editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenter);
 			}
 		});
 
@@ -137,6 +145,19 @@ class RustDocsProvider implements vscode.WebviewViewProvider {
 					h1, h2, h3, h4 {
 						color: var(--vscode-editor-foreground);
 					}
+					h3 a {
+						cursor: pointer;
+						text-decoration: none;
+					}
+					h3 a:hover {
+						text-decoration: underline;
+					}
+					hr {
+						border: none;
+						border-top: 1px solid var(--vscode-panel-border);
+						margin: 16px 0;
+						opacity: 0.5;
+					}
 					ul {
 						margin: 8px 0;
 						padding-left: 20px;
@@ -160,6 +181,9 @@ class RustDocsProvider implements vscode.WebviewViewProvider {
 					}
 					a.method-link:hover {
 						text-decoration: underline;
+					}
+					a[href*="implementations"] {
+						display: none;
 					}
 					.nav-bar {
 						display: flex;
@@ -210,6 +234,9 @@ class RustDocsProvider implements vscode.WebviewViewProvider {
 					function goForward() {
 						vscode.postMessage({ command: 'goForward' });
 					}
+					function openFile(filePath, line) {
+						vscode.postMessage({ command: 'openFile', filePath: filePath, line: line });
+					}
 				</script>
 			</head>
 			<body>
@@ -248,7 +275,7 @@ async function getRustDocumentation(symbol: string, documentUri: vscode.Uri): Pr
 				const hoverInfo = await getHoverInfo(symbol, documentUri);
 				const result = await getStructMethods(symbol, documentUri, position);
 				if (hoverInfo) {
-					return formatHoverInfo(hoverInfo, result);
+					return formatHoverInfo(hoverInfo, result, documentUri, position);
 				}
 			}
 			return `<p>No documentation found for symbol: <code>${symbol}</code></p>`;
@@ -544,9 +571,56 @@ async function getStructMethods(symbol: string, documentUri: vscode.Uri, positio
 	}
 }
 
-function formatHoverInfo(hovers: vscode.Hover[], result?: StructMethodsResult): string {
+async function formatHoverInfo(hovers: vscode.Hover[], result?: StructMethodsResult, documentUri?: vscode.Uri, position?: vscode.Position): Promise<string> {
 	if (!hovers || hovers.length === 0) {
 		return '<p>No hover information available</p>';
+	}
+
+	let filePath = '';
+	let line = 0;
+
+	// Use result's filePath if available
+	if (result && result.filePath) {
+		filePath = result.filePath;
+		// Try to get the line from definition provider
+		if (documentUri && position) {
+			try {
+				const definitions = await vscode.commands.executeCommand<vscode.Location[]>(
+					'vscode.executeDefinitionProvider',
+					documentUri,
+					position
+				);
+				if (definitions && definitions.length > 0) {
+					const defLocation = definitions[0];
+					const defRange = 'targetRange' in defLocation ? (defLocation as any).targetRange : (defLocation as vscode.Location).range;
+					if (defRange) {
+						line = defRange.start.line;
+					}
+				}
+			} catch (error) {
+				// Ignore errors
+			}
+		}
+	} else if (documentUri && position) {
+		// Fallback: Get definition location
+		try {
+			const definitions = await vscode.commands.executeCommand<vscode.Location[]>(
+				'vscode.executeDefinitionProvider',
+				documentUri,
+				position
+			);
+			if (definitions && definitions.length > 0) {
+				const defLocation = definitions[0];
+				const defUri = 'targetUri' in defLocation ? (defLocation as any).targetUri : (defLocation as vscode.Location).uri;
+				const defRange = 'targetRange' in defLocation ? (defLocation as any).targetRange : (defLocation as vscode.Location).range;
+				if (defUri) {
+					filePath = defUri.fsPath;
+					line = defRange.start.line;
+				}
+			}
+		} catch (error) {
+			// Ignore errors
+		}
 	}
 
 	let content = '<div>';
@@ -558,7 +632,7 @@ function formatHoverInfo(hovers: vscode.Hover[], result?: StructMethodsResult): 
 			if (typeof item === 'string') {
 				content += `<p>${item}</p>`;
 			} else if (item instanceof vscode.MarkdownString) {
-				content += markdownToHtml(item.value, isFirst);
+				content += markdownToHtml(item.value, isFirst, filePath, line);
 				isFirst = false;
 			} else if ('value' in item) {
 				const value = item.value;
@@ -569,7 +643,11 @@ function formatHoverInfo(hovers: vscode.Hover[], result?: StructMethodsResult): 
 						if (firstLine.startsWith('struct ')) {
 							isStruct = true;
 						}
-						content += `<h3>${escapeHtml(firstLine)}</h3>`;
+						if (filePath) {
+							content += `<h3><a href="#" onclick="openFile('${escapeHtml(filePath)}', ${line}); return false;">${escapeHtml(firstLine)}</a></h3>`;
+						} else {
+							content += `<h3>${escapeHtml(firstLine)}</h3>`;
+						}
 						if (lines.length > 1) {
 							content += `<pre><code>${escapeHtml(lines.slice(1).join('\n').trim())}</code></pre>`;
 						}
@@ -594,7 +672,8 @@ function formatHoverInfo(hovers: vscode.Hover[], result?: StructMethodsResult): 
 			content += '<li style="margin-bottom: 12px;">';
 			content += `<code><a href="#" class="method-link" onclick="showMethodDocs('${escapeHtml(fnName)}', '${escapeHtml(result.structName)}', '${escapeHtml(result.filePath)}'); return false;">${escapeHtml(method.signature)}</a></code>`;
 			if (method.doc) {
-				content += `<div style="font-size: 12px; color: var(--vscode-descriptionForeground); margin-top: 4px; margin-left: 0;">${escapeHtml(method.doc)}</div>`;
+				const docHtml = markdownToHtml(method.doc, false);
+				content += `<div style="font-size: 12px; color: var(--vscode-descriptionForeground); margin-top: 4px; margin-left: 0;">${docHtml}</div>`;
 			}
 			content += '</li>';
 		}
@@ -605,14 +684,19 @@ function formatHoverInfo(hovers: vscode.Hover[], result?: StructMethodsResult): 
 	return content;
 }
 
-function markdownToHtml(markdown: string, isFirst: boolean = false): string {
+function markdownToHtml(markdown: string, isFirst: boolean = false, filePath: string = '', line: number = 0): string {
 	let html = markdown.trim();
 
 	html = html.replace(/```(\w+)?\n([\s\S]*?)```/g, (_match, _lang, code) => {
 		if (isFirst) {
 			const lines = code.trim().split('\n');
 			const firstLine = lines[0].trim();
-			let result = `<h3>${escapeHtml(firstLine)}</h3>`;
+			let result = '';
+			if (filePath) {
+				result = `<h3><a href="#" onclick="openFile('${escapeHtml(filePath)}', ${line}); return false;">${escapeHtml(firstLine)}</a></h3>`;
+			} else {
+				result = `<h3>${escapeHtml(firstLine)}</h3>`;
+			}
 			if (lines.length > 1) {
 				result += `<pre><code>${escapeHtml(lines.slice(1).join('\n').trim())}</code></pre>`;
 			}
@@ -624,6 +708,7 @@ function markdownToHtml(markdown: string, isFirst: boolean = false): string {
 
 	html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
 
+	html = html.replace(/^---$/gm, '<hr>');
 	html = html.replace(/^### (.*$)/gm, '<h3>$1</h3>');
 	html = html.replace(/^## (.*$)/gm, '<h2>$1</h2>');
 	html = html.replace(/^# (.*$)/gm, '<h1>$1</h1>');
