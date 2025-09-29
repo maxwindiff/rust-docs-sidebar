@@ -1,0 +1,1 @@
+- Add all signficant prompts to prompts.md, organized by date. Include prompts.md changes in git commits.
