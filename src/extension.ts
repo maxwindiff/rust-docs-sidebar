@@ -267,7 +267,6 @@ interface MethodInfo {
 
 interface StructMethodsResult {
 	methods: MethodInfo[];
-	diagnostics: string[];
 	structName: string;
 	filePath: string;
 }
@@ -336,16 +335,7 @@ async function getMethodDocumentation(methodName: string, structName: string, fi
 }
 
 async function getStructMethods(symbol: string, documentUri: vscode.Uri, position: vscode.Position): Promise<StructMethodsResult> {
-	const diagnostics: string[] = [];
-
-	function log(msg: string) {
-		diagnostics.push(msg);
-		outputChannel.appendLine(msg);
-	}
-
 	try {
-		log(`Starting method search for symbol: ${symbol}`);
-
 		const definitions = await vscode.commands.executeCommand<vscode.Location[]>(
 			'vscode.executeDefinitionProvider',
 			documentUri,
@@ -353,39 +343,28 @@ async function getStructMethods(symbol: string, documentUri: vscode.Uri, positio
 		);
 
 		if (!definitions || definitions.length === 0) {
-			log('No definitions found');
-			return { methods: [], diagnostics, structName: symbol, filePath: '' };
+			return { methods: [], structName: symbol, filePath: '' };
 		}
 
-		log(`Found ${definitions.length} definition(s)`);
-
 		const defLocation = definitions[0];
-		log(`Definition location type: ${typeof defLocation}`);
-		log(`Definition location keys: ${Object.keys(defLocation).join(', ')}`);
 
 		const defUri = 'targetUri' in defLocation ? (defLocation as any).targetUri : (defLocation as vscode.Location).uri;
 		const defRange = 'targetRange' in defLocation ? (defLocation as any).targetRange : (defLocation as vscode.Location).range;
 
 		if (!defUri) {
-			log('Definition has no URI');
-			return { methods: [], diagnostics, structName: symbol, filePath: '' };
+			return { methods: [], structName: symbol, filePath: '' };
 		}
 
 		const defPath = defUri.fsPath;
-		log(`Definition path: ${defPath}`);
 
 		const workspaceFolder = vscode.workspace.getWorkspaceFolder(documentUri);
 		const cwd = workspaceFolder?.uri.fsPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 
 		if (!cwd) {
-			log('No workspace folder found');
-			return { methods: [], diagnostics, structName: symbol, filePath: '' };
+			return { methods: [], structName: symbol, filePath: '' };
 		}
 
-		log(`Workspace folder: ${cwd}`);
-
 		const isExternalCrate = !defPath.includes(cwd);
-		log(`Is external crate: ${isExternalCrate}`);
 
 		let searchPattern: string;
 		let searchPath: string;
@@ -394,8 +373,6 @@ async function getStructMethods(symbol: string, documentUri: vscode.Uri, positio
 		const defText = document.getText();
 		const lines = defText.split('\n');
 		const startLine = defRange.start.line;
-
-		log(`Definition start line: ${lines[startLine]}`);
 
 		let structName: string | undefined;
 
@@ -406,18 +383,15 @@ async function getStructMethods(symbol: string, documentUri: vscode.Uri, positio
 
 			if (typeAliasMatch) {
 				structName = typeAliasMatch[2];
-				log(`Found type alias on line ${i}: ${typeAliasMatch[1]} = ${structName}`);
 				break;
 			} else if (structMatch) {
 				structName = structMatch[1];
-				log(`Found struct on line ${i}: ${structName}`);
 				break;
 			}
 		}
 
 		if (!structName) {
 			structName = symbol;
-			log(`Using symbol as fallback: ${structName}`);
 		}
 
 		searchPattern = `impl\\s+(?:<[^>]+>\\s+)?${structName}(?:<[^>]*>)?\\s*(?:for\\s+)?\\s*\\{`;
@@ -429,23 +403,14 @@ async function getStructMethods(symbol: string, documentUri: vscode.Uri, positio
 			searchPath = cwd;
 		}
 
-		log(`Search pattern: ${searchPattern}`);
-		log(`Search path: ${searchPath}`);
-
 		const grepCommand = `grep -r -E "${searchPattern}" "${searchPath}" --include="*.rs" -A 200 || true`;
-		log(`Running command: ${grepCommand}`);
 
 		const { stdout } = await execPromise(grepCommand, { cwd }).catch((err) => {
-			log(`Grep error: ${err.message}`);
-			log(`Exit code: ${err.code}`);
 			return { stdout: err.stdout || '' };
 		});
 
-		log(`Grep output length: ${stdout.length} chars`);
-
 		if (!stdout.trim()) {
-			log('No impl blocks found');
-			return { methods: [], diagnostics, structName: symbol, filePath: '' };
+			return { methods: [], structName: symbol, filePath: '' };
 		}
 
 		const methods: Array<{signature: string, doc: string, line: number}> = [];
@@ -471,8 +436,6 @@ async function getStructMethods(symbol: string, documentUri: vscode.Uri, positio
 
 				if (signature && !signature.startsWith('_')) {
 					let doc = '';
-					const fnName = signature.split('(')[0];
-					let debugLines: string[] = [];
 					let docLines: string[] = [];
 
 					// Collect all doc lines
@@ -486,10 +449,6 @@ async function getStructMethods(symbol: string, documentUri: vscode.Uri, positio
 						}
 
 						const trimmed = prevLine.trim();
-
-						if (j >= i - 5) {
-							debugLines.push(`  [${i - j}] "${trimmed.substring(0, 60)}"`);
-						}
 
 						if (trimmed === '--' || trimmed === '') {
 							continue;
@@ -526,25 +485,14 @@ async function getStructMethods(symbol: string, documentUri: vscode.Uri, positio
 						doc = paragraph.join(' ');
 					}
 
-					if (!doc && debugLines.length > 0) {
-						log(`No doc found for ${fnName}, previous lines:`);
-						debugLines.forEach(l => log(l));
-					}
-
-					const methodLog = `Method: ${signature.substring(0, 40)}`;
-					const docLog = doc ? `Doc: "${doc}"` : 'Doc: (none)';
-					log(`${methodLog} | ${docLog}`);
 					methods.push({ signature, doc, line: i });
 				}
 			}
 		}
 
-		log(`Found ${methods.length} methods`);
-
-		return { methods, diagnostics, structName, filePath: defPath };
+		return { methods, structName, filePath: defPath };
 	} catch (error) {
-		log(`Exception: ${error instanceof Error ? error.message : 'Unknown error'}`);
-		return { methods: [], diagnostics: [error instanceof Error ? error.message : 'Unknown error'], structName: symbol, filePath: '' };
+		return { methods: [], structName: symbol, filePath: '' };
 	}
 }
 
@@ -603,15 +551,6 @@ function formatHoverInfo(hovers: vscode.Hover[], result?: StructMethodsResult): 
 			content += '</li>';
 		}
 		content += '</ul>';
-	}
-
-	if (result && result.diagnostics && result.diagnostics.length > 0) {
-		content += '<details><summary>Diagnostics</summary>';
-		content += '<pre style="font-size: 11px; max-height: 300px; overflow-y: auto;">';
-		for (const diag of result.diagnostics) {
-			content += escapeHtml(diag) + '\n';
-		}
-		content += '</pre></details>';
 	}
 
 	content += '</div>';
