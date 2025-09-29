@@ -9,10 +9,21 @@
       "Bash(npm install:*)",
       "Bash(git commit:*)",
       "Bash(git add:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(rust-analyzer:*)",
+      "Bash(cargo:*)",
+      "WebSearch",
+      "WebFetch(domain:rust-analyzer.github.io)",
+      "Bash(osascript:*)",
+      "Read(//opt/homebrew/Cellar/ripgrep/14.1.1/bin/**)",
+      "Bash(/opt/homebrew/bin/rg --version)",
+      "Read(//Users/kichi/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/time-0.3.44/src/**)"
     ],
     "deny": [],
-    "ask": []
+    "ask": [],
+    "additionalDirectories": [
+      "/Users/kichi/dev/Roo-Code-Evals/rust/"
+    ]
   },
   "outputStyle": "default"
 }
