@@ -1,6 +1,10 @@
 import * as vscode from 'vscode';
 import * as child_process from 'child_process';
 import * as util from 'util';
+import hljs from 'highlight.js/lib/core';
+import rust from 'highlight.js/lib/languages/rust';
+
+hljs.registerLanguage('rust', rust);
 
 const execPromise = util.promisify(child_process.exec);
 
@@ -124,6 +128,17 @@ class RustDocsProvider implements vscode.WebviewViewProvider {
 				<meta charset="UTF-8">
 				<meta name="viewport" content="width=device-width, initial-scale=1.0">
 				<style>
+					/* Highlight.js syntax highlighting */
+					.hljs { display: block; overflow-x: auto; padding: 0; }
+					.hljs-comment, .hljs-quote { color: var(--vscode-editor-foreground); opacity: 0.6; font-style: italic; }
+					.hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-type { color: #569CD6; }
+					.hljs-string { color: #CE9178; }
+					.hljs-number { color: #B5CEA8; }
+					.hljs-built_in, .hljs-title, .hljs-function { color: #DCDCAA; }
+					.hljs-params { color: #9CDCFE; }
+					.hljs-meta { color: #808080; }
+					.hljs-attr, .hljs-variable { color: #9CDCFE; }
+
 					body {
 						padding: 10px;
 						color: var(--vscode-foreground);
@@ -649,11 +664,14 @@ async function formatHoverInfo(hovers: vscode.Hover[], result?: StructMethodsRes
 							content += `<h3>${escapeHtml(firstLine)}</h3>`;
 						}
 						if (lines.length > 1) {
-							content += `<pre><code>${escapeHtml(lines.slice(1).join('\n').trim())}</code></pre>`;
+							const restCode = lines.slice(1).join('\n').trim();
+							const highlighted = item.language === 'rust' ? hljs.highlight(restCode, { language: 'rust' }).value : escapeHtml(restCode);
+							content += `<pre><code class="hljs">${highlighted}</code></pre>`;
 						}
 						isFirst = false;
 					} else {
-						content += `<pre><code>${escapeHtml(value)}</code></pre>`;
+						const highlighted = item.language === 'rust' ? hljs.highlight(value, { language: 'rust' }).value : escapeHtml(value);
+						content += `<pre><code class="hljs">${highlighted}</code></pre>`;
 					}
 				} else {
 					content += `<p>${value}</p>`;
@@ -687,7 +705,7 @@ async function formatHoverInfo(hovers: vscode.Hover[], result?: StructMethodsRes
 function markdownToHtml(markdown: string, isFirst: boolean = false, filePath: string = '', line: number = 0): string {
 	let html = markdown.trim();
 
-	html = html.replace(/```(\w+)?\n([\s\S]*?)```/g, (_match, _lang, code) => {
+	html = html.replace(/```(\w+)?\n([\s\S]*?)```/g, (_match, lang, code) => {
 		if (isFirst) {
 			const lines = code.trim().split('\n');
 			const firstLine = lines[0].trim();
@@ -698,12 +716,15 @@ function markdownToHtml(markdown: string, isFirst: boolean = false, filePath: st
 				result = `<h3>${escapeHtml(firstLine)}</h3>`;
 			}
 			if (lines.length > 1) {
-				result += `<pre><code>${escapeHtml(lines.slice(1).join('\n').trim())}</code></pre>`;
+				const restCode = lines.slice(1).join('\n').trim();
+				const highlighted = lang === 'rust' ? hljs.highlight(restCode, { language: 'rust' }).value : escapeHtml(restCode);
+				result += `<pre><code class="hljs">${highlighted}</code></pre>`;
 			}
 			isFirst = false;
 			return result;
 		}
-		return `<pre><code>${escapeHtml(code.trim())}</code></pre>`;
+		const highlighted = lang === 'rust' ? hljs.highlight(code.trim(), { language: 'rust' }).value : escapeHtml(code.trim());
+		return `<pre><code class="hljs">${highlighted}</code></pre>`;
 	});
 
 	html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
