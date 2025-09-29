@@ -51,8 +51,24 @@ class RustDocsProvider implements vscode.WebviewViewProvider {
 					code {
 						font-family: var(--vscode-editor-font-family);
 					}
-					h1, h2, h3 {
+					h1, h2, h3, h4 {
 						color: var(--vscode-editor-foreground);
+					}
+					ul {
+						margin: 8px 0;
+						padding-left: 20px;
+					}
+					li {
+						margin: 4px 0;
+					}
+					details {
+						margin-top: 16px;
+						font-size: 12px;
+						color: var(--vscode-descriptionForeground);
+					}
+					summary {
+						cursor: pointer;
+						user-select: none;
 					}
 				</style>
 			</head>
@@ -81,9 +97,14 @@ async function getRustDocumentation(symbol: string, documentUri: vscode.Uri): Pr
 		).catch(() => ({ stdout: '' }));
 
 		if (!searchResult.stdout.trim()) {
-			const hoverInfo = await getHoverInfo(symbol, documentUri);
-			if (hoverInfo) {
-				return formatHoverInfo(hoverInfo);
+			const editor = vscode.window.activeTextEditor;
+			if (editor) {
+				const position = editor.selection.active;
+				const hoverInfo = await getHoverInfo(symbol, documentUri);
+				const { methods, diagnostics } = await getStructMethods(symbol, documentUri, position);
+				if (hoverInfo) {
+					return formatHoverInfo(hoverInfo, methods, diagnostics);
+				}
 			}
 			return `<p>No documentation found for symbol: <code>${symbol}</code></p>`;
 		}
@@ -112,13 +133,153 @@ async function getHoverInfo(symbol: string, documentUri: vscode.Uri): Promise<vs
 	return hovers;
 }
 
-function formatHoverInfo(hovers: vscode.Hover[]): string {
+async function getStructMethods(symbol: string, documentUri: vscode.Uri, position: vscode.Position): Promise<{methods: string[], diagnostics: string[]}> {
+	const diagnostics: string[] = [];
+
+	function log(msg: string) {
+		diagnostics.push(msg);
+		outputChannel.appendLine(msg);
+	}
+
+	try {
+		log(`Starting method search for symbol: ${symbol}`);
+
+		const definitions = await vscode.commands.executeCommand<vscode.Location[]>(
+			'vscode.executeDefinitionProvider',
+			documentUri,
+			position
+		);
+
+		if (!definitions || definitions.length === 0) {
+			log('No definitions found');
+			return { methods: [], diagnostics };
+		}
+
+		log(`Found ${definitions.length} definition(s)`);
+
+		const defLocation = definitions[0];
+		log(`Definition location type: ${typeof defLocation}`);
+		log(`Definition location keys: ${Object.keys(defLocation).join(', ')}`);
+
+		const defUri = 'targetUri' in defLocation ? (defLocation as any).targetUri : (defLocation as vscode.Location).uri;
+		const defRange = 'targetRange' in defLocation ? (defLocation as any).targetRange : (defLocation as vscode.Location).range;
+
+		if (!defUri) {
+			log('Definition has no URI');
+			return { methods: [], diagnostics };
+		}
+
+		const defPath = defUri.fsPath;
+		log(`Definition path: ${defPath}`);
+
+		const workspaceFolder = vscode.workspace.getWorkspaceFolder(documentUri);
+		const cwd = workspaceFolder?.uri.fsPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+
+		if (!cwd) {
+			log('No workspace folder found');
+			return { methods: [], diagnostics };
+		}
+
+		log(`Workspace folder: ${cwd}`);
+
+		const isExternalCrate = !defPath.includes(cwd);
+		log(`Is external crate: ${isExternalCrate}`);
+
+		let searchPattern: string;
+		let searchPath: string;
+
+		const document = await vscode.workspace.openTextDocument(defUri);
+		const defText = document.getText();
+		const lines = defText.split('\n');
+		const startLine = defRange.start.line;
+
+		log(`Definition start line: ${lines[startLine]}`);
+
+		let structName: string | undefined;
+
+		for (let i = startLine; i < Math.min(startLine + 10, lines.length); i++) {
+			const line = lines[i];
+			const structMatch = line.match(/(?:pub\s+)?struct\s+(\w+)/);
+			const typeAliasMatch = line.match(/(?:pub\s+)?type\s+(\w+)\s*=\s*(\w+)/);
+
+			if (typeAliasMatch) {
+				structName = typeAliasMatch[2];
+				log(`Found type alias on line ${i}: ${typeAliasMatch[1]} = ${structName}`);
+				break;
+			} else if (structMatch) {
+				structName = structMatch[1];
+				log(`Found struct on line ${i}: ${structName}`);
+				break;
+			}
+		}
+
+		if (!structName) {
+			structName = symbol;
+			log(`Using symbol as fallback: ${structName}`);
+		}
+
+		searchPattern = `impl\\s+(?:<[^>]+>\\s+)?${structName}(?:<[^>]*>)?\\s*(?:for\\s+)?\\s*\\{`;
+
+		if (isExternalCrate) {
+			const defDir = defPath.substring(0, defPath.lastIndexOf('/'));
+			searchPath = defDir;
+		} else {
+			searchPath = cwd;
+		}
+
+		log(`Search pattern: ${searchPattern}`);
+		log(`Search path: ${searchPath}`);
+
+		const grepCommand = `grep -r -E "${searchPattern}" "${searchPath}" --include="*.rs" -A 200 || true`;
+		log(`Running command: ${grepCommand}`);
+
+		const { stdout } = await execPromise(grepCommand, { cwd }).catch((err) => {
+			log(`Grep error: ${err.message}`);
+			log(`Exit code: ${err.code}`);
+			return { stdout: err.stdout || '' };
+		});
+
+		log(`Grep output length: ${stdout.length} chars`);
+
+		if (!stdout.trim()) {
+			log('No impl blocks found');
+			return { methods: [], diagnostics };
+		}
+
+		const methods: string[] = [];
+		const methodRegex = /(?:pub\s+)?(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+([^\n]+)/g;
+
+		let match;
+		while ((match = methodRegex.exec(stdout)) !== null) {
+			let signature = match[1].trim();
+
+			if (signature.includes('{')) {
+				signature = signature.substring(0, signature.indexOf('{')).trim();
+			}
+
+			if (signature && !signature.startsWith('_')) {
+				methods.push(signature);
+			}
+		}
+
+		log(`Found ${methods.length} methods`);
+
+		return { methods: [...new Set(methods)], diagnostics };
+	} catch (error) {
+		log(`Exception: ${error instanceof Error ? error.message : 'Unknown error'}`);
+		return { methods: [], diagnostics };
+	}
+}
+
+function formatHoverInfo(hovers: vscode.Hover[], methods?: string[], diagnostics?: string[]): string {
 	if (!hovers || hovers.length === 0) {
 		return '<p>No hover information available</p>';
 	}
 
 	let content = '<div>';
 	let isFirst = true;
+	let isStruct = false;
+
 	for (const hover of hovers) {
 		for (const item of hover.contents) {
 			if (typeof item === 'string') {
@@ -132,6 +293,9 @@ function formatHoverInfo(hovers: vscode.Hover[]): string {
 					if (isFirst) {
 						const lines = value.split('\n');
 						const firstLine = lines[0].trim();
+						if (firstLine.startsWith('struct ')) {
+							isStruct = true;
+						}
 						content += `<h3>${escapeHtml(firstLine)}</h3>`;
 						if (lines.length > 1) {
 							content += `<pre><code>${escapeHtml(lines.slice(1).join('\n').trim())}</code></pre>`;
@@ -146,6 +310,25 @@ function formatHoverInfo(hovers: vscode.Hover[]): string {
 			}
 		}
 	}
+
+	if (methods && methods.length > 0) {
+		content += '<h4>Methods</h4>';
+		content += '<ul>';
+		for (const method of methods) {
+			content += `<li><code>${escapeHtml(method)}</code></li>`;
+		}
+		content += '</ul>';
+	}
+
+	if (diagnostics && diagnostics.length > 0) {
+		content += '<details><summary>Diagnostics</summary>';
+		content += '<pre style="font-size: 11px; max-height: 300px; overflow-y: auto;">';
+		for (const diag of diagnostics) {
+			content += escapeHtml(diag) + '\n';
+		}
+		content += '</pre></details>';
+	}
+
 	content += '</div>';
 	return content;
 }
@@ -197,8 +380,12 @@ function escapeHtml(text: string): string {
 		.replace(/'/g, '&#039;');
 }
 
+const outputChannel = vscode.window.createOutputChannel('Rust Docs Sidebar');
+
 export function activate(context: vscode.ExtensionContext) {
 	const provider = new RustDocsProvider(context.extensionUri);
+
+	context.subscriptions.push(outputChannel);
 
 	context.subscriptions.push(
 		vscode.window.registerWebviewViewProvider('rust-docs-sidebar.docsView', provider)
