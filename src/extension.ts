@@ -430,9 +430,38 @@ async function getStructMethods(symbol: string, documentUri: vscode.Uri, positio
 			if (fnMatch) {
 				let signature = fnMatch[1].trim();
 
+				// If signature doesn't contain '{' and doesn't end with ')', collect continuation lines
+				if (!signature.includes('{') && !signature.endsWith(')')) {
+					for (let k = i + 1; k < outputLines.length && k < i + 20; k++) {
+						let nextLine = outputLines[k];
+
+						// Strip grep prefix
+						const match = nextLine.match(/^[^:]+\.rs[:|-]/);
+						if (match) {
+							nextLine = nextLine.substring(match[0].length);
+						}
+
+						const trimmed = nextLine.trim();
+						if (trimmed === '--' || trimmed === '') {
+							continue;
+						}
+
+						signature += ' ' + trimmed;
+
+						if (trimmed.includes('{')) {
+							break;
+						}
+					}
+				}
+
 				if (signature.includes('{')) {
 					signature = signature.substring(0, signature.indexOf('{')).trim();
 				}
+
+				// Normalize whitespace: remove extra spaces after '(' and before ')'
+				signature = signature.replace(/\(\s+/g, '(').replace(/\s+\)/g, ')');
+				// Normalize multiple spaces to single space
+				signature = signature.replace(/\s+/g, ' ');
 
 				if (signature && !signature.startsWith('_')) {
 					let doc = '';

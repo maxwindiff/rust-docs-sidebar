@@ -6,7 +6,25 @@
 - Include prompts.md changes in git commits
 - Significant prompts are those that request features, bug fixes, or architectural changes
 - Exclude trivial prompts like "commit and push" or "fix typo"
-- Reload VS Code window after each significant code change
+- Reload VS Code window after each significant code change using:
+```bash
+osascript <<'EOF'
+tell application "Visual Studio Code"
+    activate
+    delay 0.1
+end tell
+
+tell application "System Events"
+    tell process "Visual Studio Code"
+        keystroke "p" using {command down, shift down}
+        delay 0.1
+        keystroke "Developer: Reload Window"
+        delay 0.1
+        keystroke return
+    end tell
+end tell
+EOF
+```
 
 ## Architecture Notes
 
@@ -28,5 +46,4 @@ Note: Earlier approaches that modified the editor (inserting temporary `.` chara
 
 ### Known Issues
 
-- Method links currently show a notification placeholder; full method documentation navigation not yet implemented
-- reload vscode window after each signficant code change
+- None currently
