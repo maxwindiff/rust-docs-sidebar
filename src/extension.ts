@@ -266,7 +266,7 @@ class RustDocsProvider implements vscode.WebviewViewProvider {
 	}
 }
 
-async function getRustDocumentation(symbol: string, documentUri: vscode.Uri): Promise<string> {
+async function getRustDocumentation(symbol: string, documentUri: vscode.Uri): Promise<string | null> {
 	try {
 		const workspaceFolder = vscode.workspace.getWorkspaceFolder(documentUri);
 		const cwd = workspaceFolder?.uri.fsPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -293,7 +293,7 @@ async function getRustDocumentation(symbol: string, documentUri: vscode.Uri): Pr
 					return formatHoverInfo(hoverInfo, result, documentUri, position);
 				}
 			}
-			return `<p>No documentation found for symbol: <code>${symbol}</code></p>`;
+			return null;
 		}
 
 		return `<h2>${symbol}</h2>
@@ -324,10 +324,18 @@ interface MethodInfo {
 	signature: string;
 	doc: string;
 	line: number;
+	implBlock?: string;
+}
+
+interface ImplBlock {
+	header: string;
+	comment?: string;
+	methods: MethodInfo[];
 }
 
 interface StructMethodsResult {
 	methods: MethodInfo[];
+	implBlocks: ImplBlock[];
 	structName: string;
 	filePath: string;
 }
@@ -404,7 +412,7 @@ async function getStructMethods(symbol: string, documentUri: vscode.Uri, positio
 		);
 
 		if (!definitions || definitions.length === 0) {
-			return { methods: [], structName: symbol, filePath: '' };
+			return { methods: [], implBlocks: [], structName: symbol, filePath: '' };
 		}
 
 		const defLocation = definitions[0];
@@ -413,7 +421,7 @@ async function getStructMethods(symbol: string, documentUri: vscode.Uri, positio
 		const defRange = 'targetRange' in defLocation ? (defLocation as any).targetRange : (defLocation as vscode.Location).range;
 
 		if (!defUri) {
-			return { methods: [], structName: symbol, filePath: '' };
+			return { methods: [], implBlocks: [], structName: symbol, filePath: '' };
 		}
 
 		const defPath = defUri.fsPath;
@@ -422,7 +430,7 @@ async function getStructMethods(symbol: string, documentUri: vscode.Uri, positio
 		const cwd = workspaceFolder?.uri.fsPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 
 		if (!cwd) {
-			return { methods: [], structName: symbol, filePath: '' };
+			return { methods: [], implBlocks: [], structName: symbol, filePath: '' };
 		}
 
 		const isExternalCrate = !defPath.includes(cwd);
@@ -464,17 +472,19 @@ async function getStructMethods(symbol: string, documentUri: vscode.Uri, positio
 			searchPath = cwd;
 		}
 
-		const grepCommand = `grep -r -E "${searchPattern}" "${searchPath}" --include="*.rs" -A 200 || true`;
+		const grepCommand = `grep -r -E "${searchPattern}" "${searchPath}" --include="*.rs" -A 1000 || true`;
 
 		const { stdout } = await execPromise(grepCommand, { cwd }).catch((err) => {
 			return { stdout: err.stdout || '' };
 		});
 
 		if (!stdout.trim()) {
-			return { methods: [], structName: symbol, filePath: '' };
+			return { methods: [], implBlocks: [], structName: symbol, filePath: '' };
 		}
 
 		const methods: Array<{signature: string, doc: string, line: number}> = [];
+		const implBlocks: ImplBlock[] = [];
+		let currentImplBlock: ImplBlock | null = null;
 
 		const outputLines = stdout.split('\n');
 		for (let i = 0; i < outputLines.length; i++) {
@@ -484,6 +494,40 @@ async function getStructMethods(symbol: string, documentUri: vscode.Uri, positio
 			const match = line.match(/^[^:]+\.rs[:|-]/);
 			if (match) {
 				line = line.substring(match[0].length);
+			}
+
+			// Check for impl block start
+			const implMatch = line.match(/^(impl(?:\s+<[^>]+>)?\s+(?:[\w:]+(?:\s+for\s+)?)?[\w<>:]+)\s*\{/);
+			if (implMatch) {
+				// Save previous impl block if it exists
+				if (currentImplBlock && currentImplBlock.methods.length > 0) {
+					implBlocks.push(currentImplBlock);
+				}
+
+				// Look backwards for comment before impl block
+				let implComment = '';
+				for (let j = i - 1; j >= Math.max(0, i - 5); j--) {
+					let prevLine = outputLines[j];
+					const prevMatch = prevLine.match(/^[^:]+\.rs[:|-]/);
+					if (prevMatch) {
+						prevLine = prevLine.substring(prevMatch[0].length);
+					}
+					const trimmed = prevLine.trim();
+					if (trimmed.startsWith('///')) {
+						implComment = trimmed.substring(3).trim();
+						break;
+					} else if (trimmed === '' || trimmed === '--') {
+						continue;
+					} else {
+						break;
+					}
+				}
+
+				currentImplBlock = {
+					header: implMatch[1].trim(),
+					comment: implComment || undefined,
+					methods: []
+				};
 			}
 
 			const fnMatch = line.match(/(?:pub\s+)?(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+(.+)/);
@@ -575,14 +619,23 @@ async function getStructMethods(symbol: string, documentUri: vscode.Uri, positio
 						doc = paragraph.join(' ');
 					}
 
-					methods.push({ signature, doc, line: i });
+					const method = { signature, doc, line: i };
+					methods.push(method);
+					if (currentImplBlock) {
+						currentImplBlock.methods.push(method);
+					}
 				}
 			}
 		}
 
-		return { methods, structName, filePath: defPath };
+		// Save the last impl block
+		if (currentImplBlock && currentImplBlock.methods.length > 0) {
+			implBlocks.push(currentImplBlock);
+		}
+
+		return { methods, implBlocks, structName, filePath: defPath };
 	} catch (error) {
-		return { methods: [], structName: symbol, filePath: '' };
+		return { methods: [], implBlocks: [], structName: symbol, filePath: '' };
 	}
 }
 
@@ -680,7 +733,32 @@ async function formatHoverInfo(hovers: vscode.Hover[], result?: StructMethodsRes
 		}
 	}
 
-	if (result && result.methods && result.methods.length > 0) {
+	if (result && result.implBlocks && result.implBlocks.length > 0) {
+		for (const implBlock of result.implBlocks) {
+			// Show impl block header
+			if (implBlock.comment) {
+				content += `<h4>${escapeHtml(implBlock.comment)}</h4>`;
+			} else {
+				content += `<h4>${escapeHtml(implBlock.header)}</h4>`;
+			}
+
+			content += '<ul style="list-style: none; padding-left: 0;">';
+			for (const method of implBlock.methods) {
+				const fnNameMatch = method.signature.match(/^(\w+)/);
+				const fnName = fnNameMatch ? fnNameMatch[1] : '';
+
+				content += '<li style="margin-bottom: 12px;">';
+				content += `<code><a href="#" class="method-link" onclick="showMethodDocs('${escapeHtml(fnName)}', '${escapeHtml(result.structName)}', '${escapeHtml(result.filePath)}'); return false;">${escapeHtml(method.signature)}</a></code>`;
+				if (method.doc) {
+					const docHtml = markdownToHtml(method.doc, false);
+					content += `<div style="font-size: 12px; color: var(--vscode-descriptionForeground); margin-top: 4px; margin-left: 0;">${docHtml}</div>`;
+				}
+				content += '</li>';
+			}
+			content += '</ul>';
+		}
+	} else if (result && result.methods && result.methods.length > 0) {
+		// Fallback: show methods without grouping if implBlocks is empty
 		content += '<h4>Methods</h4>';
 		content += '<ul style="list-style: none; padding-left: 0;">';
 		for (const method of result.methods) {
@@ -782,7 +860,9 @@ export function activate(context: vscode.ExtensionContext) {
 			if (wordRange) {
 				const word = editor.document.getText(wordRange);
 				const documentation = await getRustDocumentation(word, editor.document.uri);
-				provider.updateContent(documentation);
+				if (documentation !== null) {
+					provider.updateContent(documentation);
+				}
 			}
 		})
 	);
