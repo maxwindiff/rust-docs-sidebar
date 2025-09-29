@@ -6,7 +6,7 @@
 - Include prompts.md changes in git commits
 - Significant prompts are those that request features, bug fixes, or architectural changes
 - Exclude trivial prompts like "commit and push" or "fix typo"
-- Reload VS Code window after each significant code change using:
+- ALWAYS reload VS Code window automatically after each significant code change (compile, edit) using:
 ```bash
 osascript <<'EOF'
 tell application "Visual Studio Code"

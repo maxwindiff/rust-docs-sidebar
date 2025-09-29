@@ -49,11 +49,15 @@ class RustDocsProvider implements vscode.WebviewViewProvider {
 
 	public updateContent(content: string, title: string = '', addToHistory: boolean = true) {
 		if (this._view) {
-			// Add to history (unless we're navigating, it's placeholder content, or it's identical to the last entry)
+			// Filter out invalid/partial symbols
+			const isInvalidSymbol = content.includes('Use rust-analyzer hover') ||
+			                        (title.length === 1 && /^[a-z]$/.test(title));
+
+			// Add to history (unless we're navigating, it's placeholder content, invalid symbol, or identical to the last entry)
 			const lastEntry = this._historyIndex >= 0 ? this._history[this._historyIndex] : null;
 			const isDuplicate = lastEntry && lastEntry.title === title && lastEntry.content === content;
 
-			if (addToHistory && !content.includes('No hover information available') && !isDuplicate) {
+			if (addToHistory && !content.includes('No hover information available') && !isInvalidSymbol && !isDuplicate) {
 				// If we're in the middle of history, clear forward history
 				if (this._historyIndex >= 0 && this._historyIndex < this._history.length - 1) {
 					this._history = this._history.slice(0, this._historyIndex + 1);
@@ -61,6 +65,17 @@ class RustDocsProvider implements vscode.WebviewViewProvider {
 
 				this._history.push({ content, title });
 				this._historyIndex = this._history.length - 1;
+
+				// Limit history to 20 entries
+				if (this._history.length > 20) {
+					this._history.shift();
+					this._historyIndex = this._history.length - 1;
+				}
+			}
+
+			// Don't update UI for invalid symbols
+			if (isInvalidSymbol) {
+				return;
 			}
 
 			const canGoBack = this._historyIndex > 0;
@@ -114,6 +129,10 @@ class RustDocsProvider implements vscode.WebviewViewProvider {
 					}
 					code {
 						font-family: var(--vscode-editor-font-family);
+					}
+					pre code {
+						background: none;
+						padding: 0;
 					}
 					h1, h2, h3, h4 {
 						color: var(--vscode-editor-foreground);
