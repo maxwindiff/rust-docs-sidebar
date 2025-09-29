@@ -21,6 +21,14 @@ class RustDocsProvider implements vscode.WebviewViewProvider {
 			localResourceRoots: [this._extensionUri]
 		};
 
+		webviewView.webview.onDidReceiveMessage(async (message) => {
+			if (message.command === 'showMethodDocs') {
+				const methodName = message.methodName;
+				outputChannel.appendLine(`Clicked method: ${methodName}`);
+				vscode.window.showInformationMessage(`Method: ${methodName} (full docs coming soon)`);
+			}
+		});
+
 		webviewView.webview.html = this._getHtmlForWebview(webviewView.webview, 'Select a Rust symbol to view documentation');
 	}
 
@@ -70,7 +78,24 @@ class RustDocsProvider implements vscode.WebviewViewProvider {
 						cursor: pointer;
 						user-select: none;
 					}
+					a.method-link {
+						color: var(--vscode-textLink-foreground);
+						text-decoration: none;
+						cursor: pointer;
+					}
+					a.method-link:hover {
+						text-decoration: underline;
+					}
 				</style>
+				<script>
+					const vscode = acquireVsCodeApi();
+					function showMethodDocs(fnName) {
+						vscode.postMessage({
+							command: 'showMethodDocs',
+							methodName: fnName
+						});
+					}
+				</script>
 			</head>
 			<body>
 				${content}
@@ -133,7 +158,13 @@ async function getHoverInfo(symbol: string, documentUri: vscode.Uri): Promise<vs
 	return hovers;
 }
 
-async function getStructMethods(symbol: string, documentUri: vscode.Uri, position: vscode.Position): Promise<{methods: string[], diagnostics: string[]}> {
+interface MethodInfo {
+	signature: string;
+	doc: string;
+	line: number;
+}
+
+async function getStructMethods(symbol: string, documentUri: vscode.Uri, position: vscode.Position): Promise<{methods: MethodInfo[], diagnostics: string[]}> {
 	const diagnostics: string[] = [];
 
 	function log(msg: string) {
@@ -246,32 +277,107 @@ async function getStructMethods(symbol: string, documentUri: vscode.Uri, positio
 			return { methods: [], diagnostics };
 		}
 
-		const methods: string[] = [];
-		const methodRegex = /(?:pub\s+)?(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+([^\n]+)/g;
+		const methods: Array<{signature: string, doc: string, line: number}> = [];
 
-		let match;
-		while ((match = methodRegex.exec(stdout)) !== null) {
-			let signature = match[1].trim();
+		const outputLines = stdout.split('\n');
+		for (let i = 0; i < outputLines.length; i++) {
+			let line = outputLines[i];
 
-			if (signature.includes('{')) {
-				signature = signature.substring(0, signature.indexOf('{')).trim();
+			// Strip grep prefix: either "file.rs:" or "file.rs-"
+			const match = line.match(/^[^:]+\.rs[:|-]/);
+			if (match) {
+				line = line.substring(match[0].length);
 			}
 
-			if (signature && !signature.startsWith('_')) {
-				methods.push(signature);
+			const fnMatch = line.match(/(?:pub\s+)?(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+(.+)/);
+
+			if (fnMatch) {
+				let signature = fnMatch[1].trim();
+
+				if (signature.includes('{')) {
+					signature = signature.substring(0, signature.indexOf('{')).trim();
+				}
+
+				if (signature && !signature.startsWith('_')) {
+					let doc = '';
+					const fnName = signature.split('(')[0];
+					let debugLines: string[] = [];
+					let docLines: string[] = [];
+
+					// Collect all doc lines
+					for (let j = i - 1; j >= 0 && j >= Math.max(0, i - 30); j--) {
+						let prevLine = outputLines[j];
+
+						// Strip grep prefix: either "file.rs:" or "file.rs-"
+						const match = prevLine.match(/^[^:]+\.rs[:|-]/);
+						if (match) {
+							prevLine = prevLine.substring(match[0].length);
+						}
+
+						const trimmed = prevLine.trim();
+
+						if (j >= i - 5) {
+							debugLines.push(`  [${i - j}] "${trimmed.substring(0, 60)}"`);
+						}
+
+						if (trimmed === '--' || trimmed === '') {
+							continue;
+						}
+
+						if (trimmed.startsWith('///')) {
+							const docLine = trimmed.substring(3).trim();
+							if (docLine && !docLine.startsWith('```') && !docLine.startsWith('#') && !docLine.startsWith('assert') && !docLine.startsWith('[') && !docLine.startsWith('*')) {
+								docLines.unshift(docLine); // Add to beginning
+							}
+						} else if (trimmed.startsWith('//!') || trimmed.startsWith('//')) {
+							continue;
+						} else if (trimmed.startsWith('#[')) {
+							continue;
+						} else {
+							if (docLines.length > 0) {
+								break;
+							}
+						}
+					}
+
+					// Use first paragraph (up to 3 lines or until empty line)
+					if (docLines.length > 0) {
+						const paragraph: string[] = [];
+						for (const line of docLines) {
+							if (line === '') {
+								break;
+							}
+							paragraph.push(line);
+							if (paragraph.length >= 3) {
+								break;
+							}
+						}
+						doc = paragraph.join(' ');
+					}
+
+					if (!doc && debugLines.length > 0) {
+						log(`No doc found for ${fnName}, previous lines:`);
+						debugLines.forEach(l => log(l));
+					}
+
+					const methodLog = `Method: ${signature.substring(0, 40)}`;
+					const docLog = doc ? `Doc: "${doc}"` : 'Doc: (none)';
+					log(`${methodLog} | ${docLog}`);
+					methods.push({ signature, doc, line: i });
+				}
 			}
 		}
 
 		log(`Found ${methods.length} methods`);
 
-		return { methods: [...new Set(methods)], diagnostics };
+		return { methods, diagnostics };
 	} catch (error) {
 		log(`Exception: ${error instanceof Error ? error.message : 'Unknown error'}`);
 		return { methods: [], diagnostics };
 	}
 }
 
-function formatHoverInfo(hovers: vscode.Hover[], methods?: string[], diagnostics?: string[]): string {
+function formatHoverInfo(hovers: vscode.Hover[], methods?: MethodInfo[], diagnostics?: string[]): string {
 	if (!hovers || hovers.length === 0) {
 		return '<p>No hover information available</p>';
 	}
@@ -313,9 +419,17 @@ function formatHoverInfo(hovers: vscode.Hover[], methods?: string[], diagnostics
 
 	if (methods && methods.length > 0) {
 		content += '<h4>Methods</h4>';
-		content += '<ul>';
+		content += '<ul style="list-style: none; padding-left: 0;">';
 		for (const method of methods) {
-			content += `<li><code>${escapeHtml(method)}</code></li>`;
+			const fnNameMatch = method.signature.match(/^(\w+)/);
+			const fnName = fnNameMatch ? fnNameMatch[1] : '';
+
+			content += '<li style="margin-bottom: 12px;">';
+			content += `<code><a href="#" class="method-link" onclick="showMethodDocs('${escapeHtml(fnName)}'); return false;">${escapeHtml(method.signature)}</a></code>`;
+			if (method.doc) {
+				content += `<div style="font-size: 12px; color: var(--vscode-descriptionForeground); margin-top: 4px; margin-left: 0;">${escapeHtml(method.doc)}</div>`;
+			}
+			content += '</li>';
 		}
 		content += '</ul>';
 	}
