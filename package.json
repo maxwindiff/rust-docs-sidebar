@@ -1,6 +1,6 @@
 {
-  "name": "rust-docs",
-  "displayName": "rust-docs",
+  "name": "rust-docs-sidebar",
+  "displayName": "rust-docs-sidebar",
   "description": "",
   "version": "0.0.1",
   "engines": {
@@ -12,12 +12,25 @@
   "activationEvents": [],
   "main": "./out/extension.js",
   "contributes": {
-    "commands": [
-      {
-        "command": "rust-docs.helloWorld",
-        "title": "Hello World"
-      }
-    ]
+    "commands": [],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "rust-docs-sidebar",
+          "title": "Rust Docs Sidebar",
+          "icon": "$(book)"
+        }
+      ]
+    },
+    "views": {
+      "rust-docs-sidebar": [
+        {
+          "id": "rust-docs-sidebar.docsView",
+          "name": "Documentation",
+          "type": "webview"
+        }
+      ]
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",

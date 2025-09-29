@@ -1,6 +1,6 @@
-# rust-docs README
+# rust-docs-sidebar README
 
-This is the README for your extension "rust-docs". After writing up a brief description, we recommend including the following sections.
+This is the README for your extension "rust-docs-sidebar". After writing up a brief description, we recommend including the following sections.
 
 ## Features
 
