@@ -53,8 +53,12 @@ class RustDocsProvider implements vscode.WebviewViewProvider {
 			const lastEntry = this._historyIndex >= 0 ? this._history[this._historyIndex] : null;
 			const isDuplicate = lastEntry && lastEntry.title === title && lastEntry.content === content;
 
-			if (addToHistory && !content.includes('No hover information available') && !isDuplicate &&
-			    (this._historyIndex === -1 || this._historyIndex === this._history.length - 1)) {
+			if (addToHistory && !content.includes('No hover information available') && !isDuplicate) {
+				// If we're in the middle of history, clear forward history
+				if (this._historyIndex >= 0 && this._historyIndex < this._history.length - 1) {
+					this._history = this._history.slice(0, this._historyIndex + 1);
+				}
+
 				this._history.push({ content, title });
 				this._historyIndex = this._history.length - 1;
 			}
@@ -350,7 +354,7 @@ async function getStructMethods(symbol: string, documentUri: vscode.Uri, positio
 
 		if (!definitions || definitions.length === 0) {
 			log('No definitions found');
-			return { methods: [], diagnostics };
+			return { methods: [], diagnostics, structName: symbol, filePath: '' };
 		}
 
 		log(`Found ${definitions.length} definition(s)`);
@@ -364,7 +368,7 @@ async function getStructMethods(symbol: string, documentUri: vscode.Uri, positio
 
 		if (!defUri) {
 			log('Definition has no URI');
-			return { methods: [], diagnostics };
+			return { methods: [], diagnostics, structName: symbol, filePath: '' };
 		}
 
 		const defPath = defUri.fsPath;
@@ -375,7 +379,7 @@ async function getStructMethods(symbol: string, documentUri: vscode.Uri, positio
 
 		if (!cwd) {
 			log('No workspace folder found');
-			return { methods: [], diagnostics };
+			return { methods: [], diagnostics, structName: symbol, filePath: '' };
 		}
 
 		log(`Workspace folder: ${cwd}`);
@@ -441,7 +445,7 @@ async function getStructMethods(symbol: string, documentUri: vscode.Uri, positio
 
 		if (!stdout.trim()) {
 			log('No impl blocks found');
-			return { methods: [], diagnostics };
+			return { methods: [], diagnostics, structName: symbol, filePath: '' };
 		}
 
 		const methods: Array<{signature: string, doc: string, line: number}> = [];
