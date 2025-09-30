@@ -639,9 +639,36 @@ async function getStructMethods(symbol: string, documentUri: vscode.Uri, positio
 	}
 }
 
-async function formatHoverInfo(hovers: vscode.Hover[], result?: StructMethodsResult, documentUri?: vscode.Uri, position?: vscode.Position): Promise<string> {
+async function formatHoverInfo(hovers: vscode.Hover[], result?: StructMethodsResult, documentUri?: vscode.Uri, position?: vscode.Position): Promise<string | null> {
 	if (!hovers || hovers.length === 0) {
-		return '<p>No hover information available</p>';
+		return null;
+	}
+
+	// Count documentation sentences from markdown content
+	let docSentenceCount = 0;
+	for (const hover of hovers) {
+		for (const item of hover.contents) {
+			let textContent = '';
+			if (typeof item === 'string') {
+				textContent = item;
+			} else if (item instanceof vscode.MarkdownString) {
+				textContent = item.value;
+			} else if ('value' in item) {
+				if ('language' in item && item.language) {
+					continue; // Skip code blocks
+				}
+				textContent = item.value;
+			}
+
+			// Count sentences (split by .!? followed by whitespace or end of string)
+			const sentences = textContent.split(/[.!?](?:\s+|$)/).filter(s => s.trim().length > 0);
+			docSentenceCount += sentences.length;
+		}
+	}
+
+	// Filter out symbols with less than 3 sentences of documentation
+	if (docSentenceCount < 3) {
+		return null;
 	}
 
 	let filePath = '';
@@ -744,6 +771,12 @@ async function formatHoverInfo(hovers: vscode.Hover[], result?: StructMethodsRes
 
 			content += '<ul style="list-style: none; padding-left: 0;">';
 			for (const method of implBlock.methods) {
+				// Filter out methods with less than 3 lines of meaningful docs
+				const docLines = method.doc.split(/[.!?]\s+/).filter(s => s.trim().length > 0);
+				if (docLines.length < 3) {
+					continue;
+				}
+
 				const fnNameMatch = method.signature.match(/^(\w+)/);
 				const fnName = fnNameMatch ? fnNameMatch[1] : '';
 
@@ -762,6 +795,12 @@ async function formatHoverInfo(hovers: vscode.Hover[], result?: StructMethodsRes
 		content += '<h4>Methods</h4>';
 		content += '<ul style="list-style: none; padding-left: 0;">';
 		for (const method of result.methods) {
+			// Filter out methods with less than 3 lines of meaningful docs
+			const docLines = method.doc.split(/[.!?]\s+/).filter(s => s.trim().length > 0);
+			if (docLines.length < 3) {
+				continue;
+			}
+
 			const fnNameMatch = method.signature.match(/^(\w+)/);
 			const fnName = fnNameMatch ? fnNameMatch[1] : '';
 
