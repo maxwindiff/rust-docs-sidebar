@@ -223,6 +223,12 @@ class RustDocsProvider implements vscode.WebviewViewProvider {
 						padding: 10px;
 						color: var(--vscode-foreground);
 						font-family: var(--vscode-font-family);
+						word-wrap: break-word;
+						overflow-wrap: break-word;
+					}
+					p, div, li {
+						word-wrap: break-word;
+						overflow-wrap: break-word;
 					}
 					pre {
 						background-color: var(--vscode-textCodeBlock-background);
@@ -899,6 +905,8 @@ async function formatHoverInfo(hovers: vscode.Hover[], result?: StructMethodsRes
 function markdownToHtml(markdown: string, isFirst: boolean = false, filePath: string = '', line: number = 0): string {
 	let html = markdown.trim();
 
+	// Preserve code blocks by replacing with placeholders first
+	const codeBlocks: string[] = [];
 	html = html.replace(/```(\w+)?\n([\s\S]*?)```/g, (_match, lang, code) => {
 		if (isFirst) {
 			const lines = code.trim().split('\n');
@@ -915,13 +923,21 @@ function markdownToHtml(markdown: string, isFirst: boolean = false, filePath: st
 				result += `<pre><code class="hljs">${highlighted}</code></pre>`;
 			}
 			isFirst = false;
-			return result;
+			codeBlocks.push(result);
+			return `__CODEBLOCK_${codeBlocks.length - 1}__`;
 		}
 		const highlighted = lang === 'rust' ? hljs.highlight(code.trim(), { language: 'rust' }).value : escapeHtml(code.trim());
-		return `<pre><code class="hljs">${highlighted}</code></pre>`;
+		const block = `<pre><code class="hljs">${highlighted}</code></pre>`;
+		codeBlocks.push(block);
+		return `__CODEBLOCK_${codeBlocks.length - 1}__`;
 	});
 
-	html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+	// Preserve inline code
+	const inlineCode: string[] = [];
+	html = html.replace(/`([^`]+)`/g, (_match, code) => {
+		inlineCode.push(`<code>${code}</code>`);
+		return `__INLINECODE_${inlineCode.length - 1}__`;
+	});
 
 	html = html.replace(/^---$/gm, '<hr>');
 	html = html.replace(/^### (.*$)/gm, '<h3>$1</h3>');
@@ -933,12 +949,22 @@ function markdownToHtml(markdown: string, isFirst: boolean = false, filePath: st
 
 	html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
 
-	html = html.replace(/\n\n/g, '</p><p>');
-	html = html.replace(/\n/g, '<br>');
+	// Handle paragraph breaks: double newlines become paragraph boundaries
+	html = html.replace(/\n\n+/g, '</p><p>');
 
-	if (!html.startsWith('<h') && !html.startsWith('<pre')) {
+	// Single newlines within paragraphs become spaces (for natural text reflow)
+	// This allows documentation to wrap naturally to sidebar width
+	html = html.replace(/\n/g, ' ');
+
+	if (!html.startsWith('<h') && !html.startsWith('<pre') && !html.startsWith('__CODEBLOCK_')) {
 		html = '<p>' + html + '</p>';
 	}
+
+	// Restore code blocks
+	html = html.replace(/__CODEBLOCK_(\d+)__/g, (_match, index) => codeBlocks[parseInt(index)]);
+
+	// Restore inline code
+	html = html.replace(/__INLINECODE_(\d+)__/g, (_match, index) => inlineCode[parseInt(index)]);
 
 	return html;
 }
