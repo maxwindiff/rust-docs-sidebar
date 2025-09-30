@@ -4,7 +4,7 @@ Displays Rust docs for the selected symbol in a sidebar. Very fast (queries loca
 
 ## Features
 
-![Screenshot](screenshot.jpg)
+![Screenshot](images/screenshot.jpg)
 
 ## Release Notes
 
