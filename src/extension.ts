@@ -7,8 +7,14 @@ import rust from 'highlight.js/lib/languages/rust';
 
 hljs.registerLanguage('rust', rust);
 
-const execPromise = util.promisify(child_process.exec);
 const execFilePromise = util.promisify(child_process.execFile);
+
+// Constants
+const MIN_DOC_SENTENCES = 3;
+const MAX_GREP_CONTEXT_LINES = 1000;
+const MAX_HISTORY_ENTRIES = 20;
+const MAX_DOC_LINES_TO_SCAN = 30;
+const MAX_SIGNATURE_CONTINUATION_LINES = 20;
 
 // Input validation: only allow valid Rust identifiers with generics
 function isValidRustIdentifier(name: string): boolean {
@@ -38,6 +44,23 @@ function isPathSafe(filePath: string, workspaceFolder?: vscode.WorkspaceFolder):
 	}
 
 	return false;
+}
+
+// Strip grep output prefix (filename.rs: or filename.rs-)
+function stripGrepPrefix(line: string): string {
+	const match = line.match(/^[^:]+\.rs[:|-]/);
+	return match ? line.substring(match[0].length) : line;
+}
+
+// Count sentences in documentation text
+function countDocSentences(text: string): number {
+	const sentences = text.split(/[.!?](?:\s+|$)/).filter(s => s.trim().length > 0);
+	return sentences.length;
+}
+
+// Check if documentation meets minimum quality threshold
+function hasMinimumDocs(doc: string, minSentences: number = MIN_DOC_SENTENCES): boolean {
+	return countDocSentences(doc) >= minSentences;
 }
 
 interface NavigationEntry {
@@ -135,8 +158,8 @@ class RustDocsProvider implements vscode.WebviewViewProvider {
 				this._history.push({ content, title });
 				this._historyIndex = this._history.length - 1;
 
-				// Limit history to 20 entries
-				if (this._history.length > 20) {
+				// Limit history to MAX_HISTORY_ENTRIES
+				if (this._history.length > MAX_HISTORY_ENTRIES) {
 					this._history.shift();
 					this._historyIndex = this._history.length - 1;
 				}
@@ -411,6 +434,40 @@ interface StructMethodsResult {
 	filePath: string;
 }
 
+// Render a single method as HTML list item
+function renderMethodListItem(method: MethodInfo, structName: string, filePath: string): string {
+	const fnNameMatch = method.signature.match(/^(\w+)/);
+	const fnName = fnNameMatch ? fnNameMatch[1] : '';
+
+	const parts: string[] = [];
+	parts.push('<li style="margin-bottom: 12px;">');
+	parts.push(`<code><a href="#" class="method-link" onclick="showMethodDocs('${escapeHtml(fnName)}', '${escapeHtml(structName)}', '${escapeHtml(filePath)}'); return false;">${escapeHtml(method.signature)}</a></code>`);
+
+	if (method.doc) {
+		const docHtml = markdownToHtml(method.doc, false);
+		parts.push(`<div style="font-size: 12px; color: var(--vscode-descriptionForeground); margin-top: 4px; margin-left: 0;">${docHtml}</div>`);
+	}
+
+	parts.push('</li>');
+	return parts.join('');
+}
+
+// Render methods list with optional filtering
+function renderMethodsList(methods: MethodInfo[], structName: string, filePath: string, filterByDocs: boolean = true): string {
+	const parts: string[] = [];
+	parts.push('<ul style="list-style: none; padding-left: 0;">');
+
+	for (const method of methods) {
+		if (filterByDocs && !hasMinimumDocs(method.doc)) {
+			continue;
+		}
+		parts.push(renderMethodListItem(method, structName, filePath));
+	}
+
+	parts.push('</ul>');
+	return parts.join('');
+}
+
 async function getMethodDocumentation(methodName: string, structName: string, filePath: string): Promise<string> {
 	try {
 		outputChannel.appendLine(`Getting full docs for ${structName}::${methodName} from ${filePath}`);
@@ -556,7 +613,7 @@ async function getStructMethods(symbol: string, documentUri: vscode.Uri, positio
 			searchPattern,
 			searchPath,
 			'--include=*.rs',
-			'-A', '1000'
+			'-A', MAX_GREP_CONTEXT_LINES.toString()
 		], { cwd, maxBuffer: 10 * 1024 * 1024 }).catch((err) => {
 			// grep returns exit code 1 when no matches found, which is not an error
 			return { stdout: err.stdout || '' };
@@ -572,13 +629,7 @@ async function getStructMethods(symbol: string, documentUri: vscode.Uri, positio
 
 		const outputLines = stdout.split('\n');
 		for (let i = 0; i < outputLines.length; i++) {
-			let line = outputLines[i];
-
-			// Strip grep prefix: either "file.rs:" or "file.rs-"
-			const match = line.match(/^[^:]+\.rs[:|-]/);
-			if (match) {
-				line = line.substring(match[0].length);
-			}
+			let line = stripGrepPrefix(outputLines[i]);
 
 			// Check for impl block start
 			const implMatch = line.match(/^(impl(?:\s+<[^>]+>)?\s+(?:[\w:]+(?:\s+for\s+)?)?[\w<>:]+)\s*\{/);
@@ -591,11 +642,7 @@ async function getStructMethods(symbol: string, documentUri: vscode.Uri, positio
 				// Look backwards for comment before impl block
 				let implComment = '';
 				for (let j = i - 1; j >= Math.max(0, i - 5); j--) {
-					let prevLine = outputLines[j];
-					const prevMatch = prevLine.match(/^[^:]+\.rs[:|-]/);
-					if (prevMatch) {
-						prevLine = prevLine.substring(prevMatch[0].length);
-					}
+					const prevLine = stripGrepPrefix(outputLines[j]);
 					const trimmed = prevLine.trim();
 					if (trimmed.startsWith('///')) {
 						implComment = trimmed.substring(3).trim();
@@ -621,15 +668,8 @@ async function getStructMethods(symbol: string, documentUri: vscode.Uri, positio
 
 				// If signature doesn't contain '{' and doesn't end with ')', collect continuation lines
 				if (!signature.includes('{') && !signature.endsWith(')')) {
-					for (let k = i + 1; k < outputLines.length && k < i + 20; k++) {
-						let nextLine = outputLines[k];
-
-						// Strip grep prefix
-						const match = nextLine.match(/^[^:]+\.rs[:|-]/);
-						if (match) {
-							nextLine = nextLine.substring(match[0].length);
-						}
-
+					for (let k = i + 1; k < outputLines.length && k < i + MAX_SIGNATURE_CONTINUATION_LINES; k++) {
+						const nextLine = stripGrepPrefix(outputLines[k]);
 						const trimmed = nextLine.trim();
 						if (trimmed === '--' || trimmed === '') {
 							continue;
@@ -657,14 +697,11 @@ async function getStructMethods(symbol: string, documentUri: vscode.Uri, positio
 					let docLines: string[] = [];
 
 					// Collect all doc lines
-					for (let j = i - 1; j >= 0 && j >= Math.max(0, i - 30); j--) {
+					for (let j = i - 1; j >= 0 && j >= Math.max(0, i - MAX_DOC_LINES_TO_SCAN); j--) {
 						let prevLine = outputLines[j];
 
-						// Strip grep prefix: either "file.rs:" or "file.rs-"
-						const match = prevLine.match(/^[^:]+\.rs[:|-]/);
-						if (match) {
-							prevLine = prevLine.substring(match[0].length);
-						}
+						// Use helper to strip grep prefix
+						prevLine = stripGrepPrefix(prevLine);
 
 						const trimmed = prevLine.trim();
 
@@ -688,7 +725,7 @@ async function getStructMethods(symbol: string, documentUri: vscode.Uri, positio
 						}
 					}
 
-					// Use first paragraph (up to 3 lines or until empty line)
+					// Use first paragraph (up to MIN_DOC_SENTENCES lines or until empty line)
 					if (docLines.length > 0) {
 						const paragraph: string[] = [];
 						for (const line of docLines) {
@@ -696,7 +733,7 @@ async function getStructMethods(symbol: string, documentUri: vscode.Uri, positio
 								break;
 							}
 							paragraph.push(line);
-							if (paragraph.length >= 3) {
+							if (paragraph.length >= MIN_DOC_SENTENCES) {
 								break;
 							}
 						}
@@ -744,14 +781,12 @@ async function formatHoverInfo(hovers: vscode.Hover[], result?: StructMethodsRes
 				textContent = item.value;
 			}
 
-			// Count sentences (split by .!? followed by whitespace or end of string)
-			const sentences = textContent.split(/[.!?](?:\s+|$)/).filter(s => s.trim().length > 0);
-			docSentenceCount += sentences.length;
+			docSentenceCount += countDocSentences(textContent);
 		}
 	}
 
-	// Filter out symbols with less than 3 sentences of documentation
-	if (docSentenceCount < 3) {
+	// Filter out symbols with insufficient documentation
+	if (docSentenceCount < MIN_DOC_SENTENCES) {
 		return null;
 	}
 
@@ -847,56 +882,14 @@ async function formatHoverInfo(hovers: vscode.Hover[], result?: StructMethodsRes
 	if (result && result.implBlocks && result.implBlocks.length > 0) {
 		for (const implBlock of result.implBlocks) {
 			// Show impl block header
-			if (implBlock.comment) {
-				content += `<h4>${escapeHtml(implBlock.comment)}</h4>`;
-			} else {
-				content += `<h4>${escapeHtml(implBlock.header)}</h4>`;
-			}
-
-			content += '<ul style="list-style: none; padding-left: 0;">';
-			for (const method of implBlock.methods) {
-				// Filter out methods with less than 3 lines of meaningful docs
-				const docLines = method.doc.split(/[.!?]\s+/).filter(s => s.trim().length > 0);
-				if (docLines.length < 3) {
-					continue;
-				}
-
-				const fnNameMatch = method.signature.match(/^(\w+)/);
-				const fnName = fnNameMatch ? fnNameMatch[1] : '';
-
-				content += '<li style="margin-bottom: 12px;">';
-				content += `<code><a href="#" class="method-link" onclick="showMethodDocs('${escapeHtml(fnName)}', '${escapeHtml(result.structName)}', '${escapeHtml(result.filePath)}'); return false;">${escapeHtml(method.signature)}</a></code>`;
-				if (method.doc) {
-					const docHtml = markdownToHtml(method.doc, false);
-					content += `<div style="font-size: 12px; color: var(--vscode-descriptionForeground); margin-top: 4px; margin-left: 0;">${docHtml}</div>`;
-				}
-				content += '</li>';
-			}
-			content += '</ul>';
+			const header = implBlock.comment ? escapeHtml(implBlock.comment) : escapeHtml(implBlock.header);
+			content += `<h4>${header}</h4>`;
+			content += renderMethodsList(implBlock.methods, result.structName, result.filePath);
 		}
 	} else if (result && result.methods && result.methods.length > 0) {
 		// Fallback: show methods without grouping if implBlocks is empty
 		content += '<h4>Methods</h4>';
-		content += '<ul style="list-style: none; padding-left: 0;">';
-		for (const method of result.methods) {
-			// Filter out methods with less than 3 lines of meaningful docs
-			const docLines = method.doc.split(/[.!?]\s+/).filter(s => s.trim().length > 0);
-			if (docLines.length < 3) {
-				continue;
-			}
-
-			const fnNameMatch = method.signature.match(/^(\w+)/);
-			const fnName = fnNameMatch ? fnNameMatch[1] : '';
-
-			content += '<li style="margin-bottom: 12px;">';
-			content += `<code><a href="#" class="method-link" onclick="showMethodDocs('${escapeHtml(fnName)}', '${escapeHtml(result.structName)}', '${escapeHtml(result.filePath)}'); return false;">${escapeHtml(method.signature)}</a></code>`;
-			if (method.doc) {
-				const docHtml = markdownToHtml(method.doc, false);
-				content += `<div style="font-size: 12px; color: var(--vscode-descriptionForeground); margin-top: 4px; margin-left: 0;">${docHtml}</div>`;
-			}
-			content += '</li>';
-		}
-		content += '</ul>';
+		content += renderMethodsList(result.methods, result.structName, result.filePath);
 	}
 
 	content += '</div>';
