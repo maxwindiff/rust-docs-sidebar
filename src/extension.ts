@@ -1,12 +1,44 @@
 import * as vscode from 'vscode';
 import * as child_process from 'child_process';
 import * as util from 'util';
+import * as path from 'path';
 import hljs from 'highlight.js/lib/core';
 import rust from 'highlight.js/lib/languages/rust';
 
 hljs.registerLanguage('rust', rust);
 
 const execPromise = util.promisify(child_process.exec);
+const execFilePromise = util.promisify(child_process.execFile);
+
+// Input validation: only allow valid Rust identifiers with generics
+function isValidRustIdentifier(name: string): boolean {
+	return /^[a-zA-Z_][a-zA-Z0-9_<>:,\s]*$/.test(name);
+}
+
+// Path validation: ensure path is safe and within expected locations
+function isPathSafe(filePath: string, workspaceFolder?: vscode.WorkspaceFolder): boolean {
+	const absolutePath = path.resolve(filePath);
+
+	// Allow .rs files in workspace
+	if (workspaceFolder) {
+		const workspacePath = workspaceFolder.uri.fsPath;
+		if (absolutePath.startsWith(workspacePath) && absolutePath.endsWith('.rs')) {
+			return true;
+		}
+	}
+
+	// Allow .rs files in rustup toolchain directories
+	if (absolutePath.includes('/.rustup/') && absolutePath.endsWith('.rs')) {
+		return true;
+	}
+
+	// Allow .rs files in cargo registry
+	if (absolutePath.includes('/.cargo/registry/') && absolutePath.endsWith('.rs')) {
+		return true;
+	}
+
+	return false;
+}
 
 interface NavigationEntry {
 	content: string;
@@ -33,26 +65,51 @@ class RustDocsProvider implements vscode.WebviewViewProvider {
 		};
 
 		webviewView.webview.onDidReceiveMessage(async (message) => {
-			if (message.command === 'showMethodDocs') {
-				const methodName = message.methodName;
-				const structName = message.structName;
-				const filePath = message.filePath;
-				outputChannel.appendLine(`Clicked method: ${methodName} for struct ${structName}`);
+			try {
+				if (message.command === 'showMethodDocs') {
+					const methodName = message.methodName;
+					const structName = message.structName;
+					const filePath = message.filePath;
 
-				const methodDocs = await getMethodDocumentation(methodName, structName, filePath);
-				this.updateContent(methodDocs, `${structName}::${methodName}`);
-			} else if (message.command === 'goBack') {
-				this.goBack();
-			} else if (message.command === 'goForward') {
-				this.goForward();
-			} else if (message.command === 'openFile') {
-				const uri = vscode.Uri.file(message.filePath);
-				const document = await vscode.workspace.openTextDocument(uri);
-				const editor = await vscode.window.showTextDocument(document);
-				const line = message.line || 0;
-				const position = new vscode.Position(line, 0);
-				editor.selection = new vscode.Selection(position, position);
-				editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenter);
+					// Validate inputs
+					if (!isValidRustIdentifier(methodName) || !isValidRustIdentifier(structName)) {
+						outputChannel.appendLine(`Invalid identifier: ${methodName} or ${structName}`);
+						return;
+					}
+
+					const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+					if (!isPathSafe(filePath, workspaceFolder)) {
+						outputChannel.appendLine(`Unsafe file path: ${filePath}`);
+						return;
+					}
+
+					outputChannel.appendLine(`Clicked method: ${methodName} for struct ${structName}`);
+					const methodDocs = await getMethodDocumentation(methodName, structName, filePath);
+					this.updateContent(methodDocs, `${structName}::${methodName}`);
+				} else if (message.command === 'goBack') {
+					this.goBack();
+				} else if (message.command === 'goForward') {
+					this.goForward();
+				} else if (message.command === 'openFile') {
+					const filePath = message.filePath;
+					const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+
+					// Validate file path
+					if (!isPathSafe(filePath, workspaceFolder)) {
+						outputChannel.appendLine(`Unsafe file path: ${filePath}`);
+						return;
+					}
+
+					const uri = vscode.Uri.file(filePath);
+					const document = await vscode.workspace.openTextDocument(uri);
+					const editor = await vscode.window.showTextDocument(document);
+					const line = message.line || 0;
+					const position = new vscode.Position(line, 0);
+					editor.selection = new vscode.Selection(position, position);
+					editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenter);
+				}
+			} catch (error) {
+				outputChannel.appendLine(`Error handling message: ${error instanceof Error ? error.message : 'Unknown error'}`);
 			}
 		});
 
@@ -258,7 +315,7 @@ class RustDocsProvider implements vscode.WebviewViewProvider {
 				<div class="nav-bar">
 					<button class="nav-button" onclick="goBack()" ${canGoBack ? '' : 'disabled'}>← Back</button>
 					<button class="nav-button" onclick="goForward()" ${canGoForward ? '' : 'disabled'}>Forward →</button>
-					${title ? `<div class="nav-title">${title}</div>` : ''}
+					${title ? `<div class="nav-title">${escapeHtml(title)}</div>` : ''}
 				</div>
 				${content}
 			</body>
@@ -268,6 +325,12 @@ class RustDocsProvider implements vscode.WebviewViewProvider {
 
 async function getRustDocumentation(symbol: string, documentUri: vscode.Uri): Promise<string | null> {
 	try {
+		// Validate symbol is a valid Rust identifier
+		if (!isValidRustIdentifier(symbol)) {
+			outputChannel.appendLine(`Invalid symbol name: ${symbol}`);
+			return null;
+		}
+
 		const workspaceFolder = vscode.workspace.getWorkspaceFolder(documentUri);
 		const cwd = workspaceFolder?.uri.fsPath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 
@@ -275,13 +338,21 @@ async function getRustDocumentation(symbol: string, documentUri: vscode.Uri): Pr
 			return '<p>No workspace folder found</p>';
 		}
 
-		const { stdout } = await execPromise(`rustup doc --path`, { cwd });
+		const { stdout } = await execFilePromise('rustup', ['doc', '--path'], { cwd });
 		const docsPath = stdout.trim();
 
-		const searchResult = await execPromise(
-			`rg -i "^${symbol}" "${docsPath}" --type html -l | head -5`,
-			{ cwd }
-		).catch(() => ({ stdout: '' }));
+		// Use execFile with array arguments to prevent command injection
+		const searchResult = await execFilePromise('rg', [
+			'-i',
+			`^${symbol}`,
+			docsPath,
+			'--type', 'html',
+			'-l'
+		], { cwd }).then(result => {
+			// Limit to first 5 lines
+			const lines = result.stdout.trim().split('\n').slice(0, 5);
+			return { stdout: lines.join('\n') };
+		}).catch(() => ({ stdout: '' }));
 
 		if (!searchResult.stdout.trim()) {
 			const editor = vscode.window.activeTextEditor;
@@ -463,6 +534,12 @@ async function getStructMethods(symbol: string, documentUri: vscode.Uri, positio
 			structName = symbol;
 		}
 
+		// Validate struct name before using in regex
+		if (!isValidRustIdentifier(structName)) {
+			outputChannel.appendLine(`Invalid struct name: ${structName}`);
+			return { methods: [], implBlocks: [], structName: symbol, filePath: '' };
+		}
+
 		searchPattern = `impl\\s+(?:<[^>]+>\\s+)?${structName}(?:<[^>]*>)?\\s*(?:for\\s+)?\\s*\\{`;
 
 		if (isExternalCrate) {
@@ -472,9 +549,16 @@ async function getStructMethods(symbol: string, documentUri: vscode.Uri, positio
 			searchPath = cwd;
 		}
 
-		const grepCommand = `grep -r -E "${searchPattern}" "${searchPath}" --include="*.rs" -A 1000 || true`;
-
-		const { stdout } = await execPromise(grepCommand, { cwd }).catch((err) => {
+		// Use execFile to prevent command injection
+		const { stdout } = await execFilePromise('grep', [
+			'-r',
+			'-E',
+			searchPattern,
+			searchPath,
+			'--include=*.rs',
+			'-A', '1000'
+		], { cwd, maxBuffer: 10 * 1024 * 1024 }).catch((err) => {
+			// grep returns exit code 1 when no matches found, which is not an error
 			return { stdout: err.stdout || '' };
 		});
 
@@ -888,20 +972,24 @@ export function activate(context: vscode.ExtensionContext) {
 
 	context.subscriptions.push(
 		vscode.window.onDidChangeTextEditorSelection(async (event) => {
-			const editor = event.textEditor;
-			if (editor.document.languageId !== 'rust') {
-				return;
-			}
-
-			const position = editor.selection.active;
-			const wordRange = editor.document.getWordRangeAtPosition(position);
-
-			if (wordRange) {
-				const word = editor.document.getText(wordRange);
-				const documentation = await getRustDocumentation(word, editor.document.uri);
-				if (documentation !== null) {
-					provider.updateContent(documentation);
+			try {
+				const editor = event.textEditor;
+				if (editor.document.languageId !== 'rust') {
+					return;
 				}
+
+				const position = editor.selection.active;
+				const wordRange = editor.document.getWordRangeAtPosition(position);
+
+				if (wordRange) {
+					const word = editor.document.getText(wordRange);
+					const documentation = await getRustDocumentation(word, editor.document.uri);
+					if (documentation !== null) {
+						provider.updateContent(documentation);
+					}
+				}
+			} catch (error) {
+				outputChannel.appendLine(`Error in selection handler: ${error instanceof Error ? error.message : 'Unknown error'}`);
 			}
 		})
 	);

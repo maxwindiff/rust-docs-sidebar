@@ -1,13 +1,27 @@
 {
   "name": "rust-docs-sidebar",
-  "displayName": "rust-docs-sidebar",
-  "description": "Sidebar which displays Rust docs for the selected symbol",
+  "displayName": "Rust Docs Sidebar",
+  "description": "Displays Rust documentation for the selected symbol in a convenient sidebar with fast local search",
   "version": "0.0.1",
+  "publisher": "maxwindiff",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/maxwindiff/rust-docs-sidebar"
+  },
+  "keywords": [
+    "rust",
+    "documentation",
+    "rustdoc",
+    "sidebar",
+    "docs"
+  ],
   "engines": {
     "vscode": "^1.104.0"
   },
   "categories": [
-    "Other"
+    "Programming Languages",
+    "Documentation"
   ],
   "activationEvents": [],
   "main": "./out/extension.js",
