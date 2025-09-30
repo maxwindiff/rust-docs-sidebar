@@ -1,7 +1,7 @@
 {
   "name": "rust-docs-sidebar",
   "displayName": "rust-docs-sidebar",
-  "description": "",
+  "description": "Sidebar which displays Rust docs for the selected symbol",
   "version": "0.0.1",
   "engines": {
     "vscode": "^1.104.0"

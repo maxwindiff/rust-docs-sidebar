@@ -41,9 +41,3 @@ The extension displays methods for Rust structs using the following approach:
 Grep output format: `filename.rs:` or `filename.rs-` prefix must be stripped before parsing.
 
 This approach works for both local structs and external crate types (e.g., `DateTime` from the `time` crate).
-
-Note: Earlier approaches that modified the editor (inserting temporary `.` characters) caused glitches and should be avoided.
-
-### Known Issues
-
-- None currently
