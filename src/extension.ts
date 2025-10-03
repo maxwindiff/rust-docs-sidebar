@@ -16,9 +16,23 @@ const MAX_HISTORY_ENTRIES = 20;
 const MAX_DOC_LINES_TO_SCAN = 30;
 const MAX_SIGNATURE_CONTINUATION_LINES = 20;
 
+// Rust language keywords that should be ignored
+const RUST_KEYWORDS = new Set([
+	'if', 'else', 'let', 'return', 'struct', 'use', 'fn', 'impl', 'trait',
+	'enum', 'match', 'while', 'for', 'loop', 'break', 'continue', 'mod',
+	'pub', 'const', 'static', 'mut', 'ref', 'move', 'where', 'async',
+	'await', 'dyn', 'type', 'unsafe', 'extern', 'crate', 'super', 'self',
+	'Self', 'as', 'in', 'true', 'false', 'Box', 'Some', 'None', 'Ok', 'Err'
+]);
+
 // Input validation: only allow valid Rust identifiers with generics
 function isValidRustIdentifier(name: string): boolean {
 	return /^[a-zA-Z_][a-zA-Z0-9_<>:,\s]*$/.test(name);
+}
+
+// Check if symbol is a Rust keyword
+function isRustKeyword(name: string): boolean {
+	return RUST_KEYWORDS.has(name);
 }
 
 // Path validation: ensure path is safe and within expected locations
@@ -1002,6 +1016,12 @@ export function activate(context: vscode.ExtensionContext) {
 
 				if (wordRange) {
 					const word = editor.document.getText(wordRange);
+
+					// Skip keywords
+					if (isRustKeyword(word)) {
+						return;
+					}
+
 					const documentation = await getRustDocumentation(word, editor.document.uri);
 					if (documentation !== null) {
 						provider.updateContent(documentation);
